@@ -71,6 +71,7 @@ class SensorModel:
 
         # Initialize node
         self.pub = rospy.Publisher("~ue_sensor_out", PointCloud2, queue_size=10)
+        # TODO: (michbaum) Adapt
         self.sub = rospy.Subscriber("ue_sensor_raw", UeSensorRaw, self.callback, queue_size=10)
         if self.publish_color_images or self.publish_gray_images:
             self.cv_bridge = cv_bridge.CvBridge()
