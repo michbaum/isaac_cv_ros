@@ -7,6 +7,7 @@ from trajectory_msgs.msg import MultiDOFJointTrajectory, MultiDOFJointTrajectory
 from geometry_msgs.msg import Pose, Twist, Transform
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
+from isaac_cv_ros.msg import IsaacSensorRaw
 from gazebo_msgs.msg import ModelState
 from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Empty
@@ -51,8 +52,8 @@ class SimulationManager:
 
             # Subscribers
             # TODO: (michbaum) Adapt
-            self.ue_raw_sub = rospy.Subscriber("ue_raw_in", UeSensorRaw, self.mon_raw_callback, queue_size=10)
-            self.ue_out_sub = rospy.Subscriber("ue_out_in", PointCloud2, self.mon_out_callback, queue_size=10)
+            self.isaac_raw_sub = rospy.Subscriber("isaac_raw_in", IsaacSensorRaw, self.mon_raw_callback, queue_size=10)
+            self.isaac_out_sub = rospy.Subscriber("isaac_out_in", PointCloud2, self.mon_out_callback, queue_size=10)
 
             # Printing service
             rospy.Service('~display_monitor', Empty, self.mon_print_handle)
@@ -121,14 +122,14 @@ class SimulationManager:
                 twist.x ** 2 + twist.y ** 2 + twist.z ** 2)
         rospy.loginfo("Waiting for MAV to stabilize ... done.")
 
-        # Wait for unreal client
-        rospy.loginfo("Waiting for unreal client to setup ...")
-        rospy.wait_for_message("ue_out_in", PointCloud2)
-        rospy.loginfo("Waiting for unreal client to setup ... done.")
+        # Wait for isaac client
+        rospy.loginfo("Waiting for isaac client to setup ...")
+        rospy.wait_for_message("isaac_out_in", PointCloud2)
+        rospy.loginfo("Waiting for isaac client to setup ... done.")
 
         # Finish
         self.ready_pub.publish(String("Simulation Ready"))
-        rospy.loginfo("Unreal MAV simulation setup successfully.")
+        rospy.loginfo("Isaac MAV simulation setup successfully.")
 
     def mon_raw_callback(self, ros_data):
         # Measure walltime and rostime between callbacks

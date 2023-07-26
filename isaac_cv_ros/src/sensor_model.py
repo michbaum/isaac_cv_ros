@@ -3,11 +3,13 @@
 # ros
 import rospy
 from sensor_msgs.msg import PointCloud2, PointField, Image
+from isaac_cv_ros.msg import IsaacSensorRaw
 
 # Image conversion
 import io
 import cv2
-import cv_bridge
+from cv_bridge import CvBridge, CvBridgeError
+
 import PIL.Image
 # Python
 import sys
@@ -29,7 +31,7 @@ class SensorModel:
 
         # Read in params
         model_type_in = rospy.get_param('~model_type', 'ground_truth')
-        camera_params_ns = rospy.get_param('~camera_params_ns', rospy.get_namespace()+"unreal_ros_client/camera_params")
+        camera_params_ns = rospy.get_param('~camera_params_ns', rospy.get_namespace()+"isaac_ros_client/camera_params")
         self.publish_color_images = rospy.get_param('~publish_color_images', False)
         self.publish_gray_images = rospy.get_param('~publish_gray_images', False)
         self.maximum_distance = rospy.get_param('~maximum_distance', 0)  # Set to 0 to keep all points
@@ -56,7 +58,7 @@ class SensorModel:
 
         # Initialize camera params from params or wait for unreal_ros_client to publish them
         if not rospy.has_param(camera_params_ns+'width'):
-            rospy.loginfo("Waiting for unreal camera params at '%s' ...", camera_params_ns)
+            rospy.loginfo("Waiting for isaac camera params at '%s' ...", camera_params_ns)
             while not rospy.has_param(camera_params_ns+'/width'):
                 rospy.sleep(0.1)
         
@@ -70,32 +72,30 @@ class SensorModel:
         # rospy.loginfo(self.camera_params)
 
         # Initialize node
-        self.pub = rospy.Publisher("~ue_sensor_out", PointCloud2, queue_size=10)
+        self.pub = rospy.Publisher("~isaac_sensor_out", PointCloud2, queue_size=10)
         # TODO: (michbaum) Adapt
-        self.sub = rospy.Subscriber("ue_sensor_raw", UeSensorRaw, self.callback, queue_size=10)
+        self.sub = rospy.Subscriber("isaac_sensor_raw", IsaacSensorRaw, self.callback, queue_size=10)
         if self.publish_color_images or self.publish_gray_images:
-            self.cv_bridge = cv_bridge.CvBridge()
+            self.cv_bridge = CvBridge()
         if self.publish_color_images:
-            self.color_img_pub = rospy.Publisher("~ue_color_image_out", Image, queue_size=10)
+            self.color_img_pub = rospy.Publisher("~isaac_color_image_out", Image, queue_size=10)
         if self.publish_gray_images:
-            self.gray_img_pub = rospy.Publisher("~ue_gray_image_out", Image, queue_size=10)
+            self.gray_img_pub = rospy.Publisher("~isaac_gray_image_out", Image, queue_size=10)
 
         rospy.loginfo("Sensor model setup cleanly.")
 
     def callback(self, ros_data):
         ''' Produce simulated sensor outputs from raw binary data '''
         # Read out images
-        now = rospy.Time.now()
-        img_color = np.asarray(PIL.Image.open(io.BytesIO(ros_data.color_data)))
-        rospy.loginfo("Unpacking color data takes %f s", (rospy.Time.now() - now).to_sec())
-        # img_depth = np.asarray(PIL.Image.open(io.BytesIO(ros_data.depth_data)))
-        # img_depth = np.array(ros_data.depth_data).reshape((480,640))*64 -> scaling issues
-        # img_depth = np.array(ros_data.depth_data).reshape((480,640))/64 -> probably the right scale?
-        now = rospy.Time.now()
-        img_depth = np.array(ros_data.depth_data).reshape((480,640)) / 100.0 # TODO: (michbaum) I think this is the correct scale, at least it looks right
-        rospy.loginfo("Unpacking depth data takes %f s", (rospy.Time.now() - now).to_sec())
-        # DEBUGGING
-        # plt.imshow(img_depth)
+        img_color = ros_data.color_data
+        # img_depth = np.array(ros_data.depth_data).reshape((480,640)) / 100.0 # TODO: (michbaum) I think this is the correct scale, at least it looks right
+        img_depth = ros_data.depth_data
+
+        # rgb_msg = Image()
+        # rgb_msg.data = img_color
+        # bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg)
+        # # DEBUGGING
+        # plt.imshow(bgr_image)
         # plt.show()
         # pdb.set_trace()
         # img_depth = np.asarray(ros_data.depth_data, dtype = np.float32).reshape((480, 640))
@@ -105,7 +105,7 @@ class SensorModel:
         #pdb.set_trace()
         #np.save('~/depth.npy')
         
-        now = rospy.Time.now()
+        # TODO: (michbaum) Check if this stuff still works
         mask_depth = img_depth.reshape(-1)
 
         # Build 3D point cloud from depth
@@ -113,8 +113,10 @@ class SensorModel:
             img_depth = np.clip(img_depth, 0, self.flatten_distance)
         (x, y, z) = self.depth_to_3d(img_depth)
 
+        # TODO: (michbaum) Check if this works
         # Pack RGB image (for ros representation)
         rgb = self.rgb_to_float(img_color)
+        # rgb = img_color
 
         # Remove invalid points
         if self.maximum_distance > 0:
@@ -130,10 +132,8 @@ class SensorModel:
         elif self.model == 'gaussian_depth_noise':
             z = self.process_gaussian_depth_noise(z)
 
-        rospy.loginfo("Processing sensor data takes %f s", (rospy.Time.now() - now).to_sec())
 
         # Publish pointcloud
-        now = rospy.Time.now()
         data = np.transpose(np.vstack((x, y, z, rgb)))
         msg = PointCloud2()
         msg.header.stamp = ros_data.header.stamp
@@ -152,21 +152,38 @@ class SensorModel:
         #msg.data = np.float32(data).tostring()
         msg.data = data.astype(np.float32).tobytes()
         self.pub.publish(msg)
-        rospy.loginfo("Publishing pointcloud takes %f s", (rospy.Time.now() - now).to_sec())
 
         # If requested, also publish the image
         if self.publish_color_images:
-            img_msg = self.cv_bridge.cv2_to_imgmsg(img_color, "rgba8")
-            img_msg.header.stamp = ros_data.header.stamp
-            img_msg.header.frame_id = 'camera'
-            self.color_img_pub.publish(img_msg)
+            # img_msg = self.cv_bridge.cv2_to_imgmsg(img_color, "rgba8")
+            grayscale_msg = Image()
+            grayscale_msg.header.stamp = ros_data.header.stamp
+            grayscale_msg.header.frame_id = 'camera'
+            grayscale_msg.data = img_color
+            self.color_img_pub.publish(grayscale_msg)
         if self.publish_gray_images:
-            now = rospy.Time.now()
-            img_msg = self.cv_bridge.cv2_to_imgmsg(cv2.cvtColor(img_color[:, :, 0:3], cv2.COLOR_RGB2GRAY), "mono8")
-            img_msg.header.stamp = ros_data.header.stamp
-            img_msg.header.frame_id = 'camera'
-            self.gray_img_pub.publish(img_msg)
-            rospy.loginfo("Converting to grayscale and publishing takes %f s", (rospy.Time.now() - now).to_sec())
+            # img_msg = self.cv_bridge.cv2_to_imgmsg(cv2.cvtColor(img_color[:, :, 0:3], cv2.COLOR_RGB2GRAY), "mono8")
+            rgb_msg = Image()
+            rgb_msg.data = img_color
+            # Utilize cv_bridge to transform it to grayscale
+            try:
+                # Convert the ROS Image message to a BGR OpenCV image
+                bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
+
+                # Convert the BGR image to grayscale
+                grayscale_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+
+                # Convert the grayscale image back to a ROS Image message
+                grayscale_msg = self.cv_bridge.cv2_to_imgmsg(grayscale_image, "mono8")
+
+                # Publish the grayscale image
+                grayscale_msg.header.stamp = ros_data.header.stamp
+                grayscale_msg.header.frame_id = 'camera'
+                self.gray_img_pub.publish(grayscale_msg)
+
+            except CvBridgeError as e:
+                rospy.logerr("CVBridge Error: %s", e)
+            
 
     def depth_to_3d(self, img_depth):
         ''' Create point cloud from depth image and camera params. Returns a single array for x, y and z coords '''

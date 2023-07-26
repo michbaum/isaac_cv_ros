@@ -76,10 +76,10 @@ class PathPublisher:
         self.launch_simulation()
 
     def launch_simulation(self):
-        # Wait for unreal simulation to setup
-        rospy.loginfo("Example Path Publisher: waiting for unreal MAV simulationto setup...")
-        rospy.wait_for_message("unreal_simulation_ready", String)
-        rospy.loginfo("Example Path Publisher: Waiting for unreal MAV simulationto setup... done.")
+        # Wait for isaac simulation to setup
+        rospy.loginfo("Example Path Publisher: waiting for isaac MAV simulationto setup...")
+        rospy.wait_for_message("isaac_simulation_ready", String)
+        rospy.loginfo("Example Path Publisher: Waiting for isaac MAV simulationto setup... done.")
 
         if self.delay > 0:
             rospy.loginfo("Example Path Publisher: Launch in %d seconds.", self.delay)
