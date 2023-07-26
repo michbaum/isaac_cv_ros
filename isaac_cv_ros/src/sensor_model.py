@@ -75,8 +75,7 @@ class SensorModel:
         self.pub = rospy.Publisher("~isaac_sensor_out", PointCloud2, queue_size=10)
         # TODO: (michbaum) Adapt
         self.sub = rospy.Subscriber("isaac_sensor_raw", IsaacSensorRaw, self.callback, queue_size=10)
-        if self.publish_color_images or self.publish_gray_images:
-            self.cv_bridge = CvBridge()
+        self.cv_bridge = CvBridge()
         if self.publish_color_images:
             self.color_img_pub = rospy.Publisher("~isaac_color_image_out", Image, queue_size=10)
         if self.publish_gray_images:
@@ -87,17 +86,25 @@ class SensorModel:
     def callback(self, ros_data):
         ''' Produce simulated sensor outputs from raw binary data '''
         # Read out images
-        img_color = ros_data.color_data
+        if ros_data.color_data is not None:
+            img_color = self.cv_bridge.imgmsg_to_cv2(ros_data.color_data)
+        else:
+            rospy.logerr("Color image not populated!!")
         # img_depth = np.array(ros_data.depth_data).reshape((480,640)) / 100.0 # TODO: (michbaum) I think this is the correct scale, at least it looks right
-        img_depth = ros_data.depth_data
+        if ros_data.depth_data is not None:
+            img_depth = self.cv_bridge.imgmsg_to_cv2(ros_data.depth_data)
+        else:
+            rospy.logerr("Depth image not populated!!")
 
         # rgb_msg = Image()
         # rgb_msg.data = img_color
         # bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg)
-        # # DEBUGGING
-        # plt.imshow(bgr_image)
-        # plt.show()
-        # pdb.set_trace()
+        # DEBUGGING
+        plt.imshow(img_color)
+        plt.show()
+        
+        plt.imshow(img_depth)
+        plt.show()
         # img_depth = np.asarray(ros_data.depth_data, dtype = np.float32).reshape((480, 640))
         #print(img_depth[0])
         # img_depth = np.load(io.BytesIO(ros_data.depth_data))
