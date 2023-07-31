@@ -41,11 +41,8 @@ class IsaacRosClient:
         self.should_terminate = False
 
         # Read in params
-        # self.mode = rospy.get_param('~mode', "standard")  # Client mode (test, standard, fast, fast2)
         self.collision_on = rospy.get_param('~collision_on', True)  # Check for collision
         self.publish_tf = rospy.get_param('~publish_tf', False)  # If true publish the camera transformation in tf
-        # self.slowdown = rospy.get_param('~slowdown', 0.0)  # Artificially slow down rate for UE to finish rendering
-        # self.camera_id = rospy.get_param('~camera_id', 0)  # CameraID for unrealcv compatibility (usually use 0)
         self.queue_size = rospy.get_param('~queue_size', 1)  # How many requests are kept
         self.lock = threading.Lock()
         self.service_proxy = rospy.ServiceProxy('teleport', IsaacPose, persistent=True)
@@ -55,9 +52,12 @@ class IsaacRosClient:
         self.tfListener = tf2_ros.TransformListener(self.tfBuffer)
 
         # Wait for the relevant transforms to be available
-        self.tfBuffer.can_transform("camera_sim", "camera", rospy.Time(0), rospy.Duration(10.0))
+        self.tfBuffer.can_transform("sim_world", "camera_sim", rospy.Time(0), rospy.Duration(10.0))
+    
         
         self.previous_odom_msg = None  # Previously processed Odom message
+
+        # TODO: At the moment we can't support collisions, would need mor Isaac Sim sided coding most likely
         self.collision_tolerance = rospy.get_param('~collision_tol', 10)  # Distance threshold in UE units
 
 
@@ -145,14 +145,14 @@ class IsaacRosClient:
         # Check if rgb image is already written
         if self.image_message.color_data is None:
             # Acquire lock for the message
-            rospy.loginfo("Trying to acquire lock in rgb_callback.")
+            # rospy.loginfo("Trying to acquire lock in rgb_callback.")
             with self.lock:
                 self.image_message.color_data = rgb_data
-                rospy.loginfo("In rgb callback after acquiring lock.")
+                # rospy.loginfo("In rgb callback after acquiring lock.")
 
                 # Check if depth has also been written, then we can publish
                 if self.image_message.depth_data is not None:
-                    rospy.loginfo("In rgb callback publishing.")
+                    # rospy.loginfo("In rgb callback publishing.")
                     self.pub.publish(self.image_message)
 
                     # Reset the message
@@ -173,14 +173,14 @@ class IsaacRosClient:
         # Check if rgb image is already written
         if self.image_message.depth_data is None:
             # Acquire lock for the message
-            rospy.loginfo("Trying to acquire lock in depth_callback.")
+            # rospy.loginfo("Trying to acquire lock in depth_callback.")
             with self.lock:
                 self.image_message.depth_data = depth_data
-                rospy.loginfo("In depth callback after acquiring lock.")
+                # rospy.loginfo("In depth callback after acquiring lock.")
 
                 # Check if rgb has also been written, then we can publish
                 if self.image_message.color_data is not None:
-                    rospy.loginfo("In depth callback publishing.")
+                    # rospy.loginfo("In depth callback publishing.")
                     self.pub.publish(self.image_message)
 
                     # Reset the message
@@ -209,7 +209,7 @@ class IsaacRosClient:
         if self.odom_ready:
             return
         
-        rospy.loginfo("In odom callback past odom_ready.")
+        # rospy.loginfo("In odom callback past odom_ready.")
 
         # Generate images - but only after the last set of images has been sent
         if self.previous_odom_msg is not None:
@@ -220,7 +220,7 @@ class IsaacRosClient:
             with self.lock:
                 self.publish_images(self.previous_odom_msg)
             
-            rospy.loginfo("Releasing lock in odom callback.")
+            # rospy.loginfo("Releasing lock in odom callback.")
 
 
         self.previous_odom_msg = ros_data
@@ -234,7 +234,11 @@ class IsaacRosClient:
         teleport_msg = IsaacPoseRequest()
         teleport_msg.names = ["/World/Camera"]
         # Transform the physics odometry pose to the isaac frame
-        isaac_pose = self.pose_to_isaac(odom_msg.pose).pose
+        isaac_pose = self.pose_to_isaac(odom_msg)
+        if isaac_pose is None:
+            rospy.loginfo("Couldn't teleport, won't publish images.")
+            return
+        
         teleport_msg.poses = [isaac_pose]
 
         # DEBUGGING
@@ -244,12 +248,12 @@ class IsaacRosClient:
         # Format the complete Pose information as a string
         pose_info = "\n".join([position_str, orientation_str])
         # Print the Pose information using rospy.loginfo
-        rospy.loginfo("Trying to move the camera to:\n%s", pose_info)
+        rospy.loginfo("Trying to move the camera to:\n%s in /isaac_sim frame", pose_info)
 
         # Call the service
         self.service_proxy(teleport_msg)
 
-        rospy.loginfo("Teleported")
+        # rospy.loginfo("Teleported")
 
         # TODO: (michbaum) Need a new solution for collision
         # # Set camera in unrealcv
@@ -284,11 +288,26 @@ class IsaacRosClient:
         # Transform the pose from /camera to /camera_sim frame
         try:
             # Create a TransformStamped object to store the transformed pose
-            transformStamped = self.tfBuffer.lookup_transform("camera", "camera_sim", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("camera_sim", "sim_world", pose.header.stamp)
+            transformStamped = self.tfBuffer.lookup_transform("sim_world", "camera_sim", pose.header.stamp)
+
+            # transformStamped = self.tfBuffer.lookup_transform("camera_sim", "world", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("world", "camera_sim", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("firefly/base_link", "camera_sim", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("camera_sim", "firefly/base_link", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("sim_world", "world", rospy.Time(0))
+            # transformStamped = self.tfBuffer.lookup_transform("world", "sim_world", rospy.Time(0))
 
             # Use do_transform_pose to transform the pose
-            transformed_pose = do_transform_pose(pose, transformStamped)
+            # transformed_pose = do_transform_pose(pose, transformStamped)
 
+            transformed_pose = Pose()
+            transformed_pose.orientation = transformStamped.transform.rotation
+            transformed_pose.position.x = transformStamped.transform.translation.x
+            transformed_pose.position.y = transformStamped.transform.translation.y
+            transformed_pose.position.z = transformStamped.transform.translation.z
+
+            # return transformed_pose
             return transformed_pose
 
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):

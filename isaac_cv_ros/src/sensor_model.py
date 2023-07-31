@@ -85,6 +85,8 @@ class SensorModel:
 
     def callback(self, ros_data):
         ''' Produce simulated sensor outputs from raw binary data '''
+        # Time the callback
+        now = rospy.Time.now()
         # Read out images
         if ros_data.color_data is not None:
             img_color = self.cv_bridge.imgmsg_to_cv2(ros_data.color_data)
@@ -100,11 +102,11 @@ class SensorModel:
         # rgb_msg.data = img_color
         # bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg)
         # DEBUGGING
-        plt.imshow(img_color)
-        plt.show()
+        # plt.imshow(img_color)
+        # plt.show()
         
-        plt.imshow(img_depth)
-        plt.show()
+        # plt.imshow(img_depth)
+        # plt.show()
         # img_depth = np.asarray(ros_data.depth_data, dtype = np.float32).reshape((480, 640))
         #print(img_depth[0])
         # img_depth = np.load(io.BytesIO(ros_data.depth_data))
@@ -163,22 +165,13 @@ class SensorModel:
         # If requested, also publish the image
         if self.publish_color_images:
             # img_msg = self.cv_bridge.cv2_to_imgmsg(img_color, "rgba8")
-            grayscale_msg = Image()
-            grayscale_msg.header.stamp = ros_data.header.stamp
-            grayscale_msg.header.frame_id = 'camera'
-            grayscale_msg.data = img_color
-            self.color_img_pub.publish(grayscale_msg)
+            self.color_img_pub.publish(ros_data.color_data)
         if self.publish_gray_images:
             # img_msg = self.cv_bridge.cv2_to_imgmsg(cv2.cvtColor(img_color[:, :, 0:3], cv2.COLOR_RGB2GRAY), "mono8")
-            rgb_msg = Image()
-            rgb_msg.data = img_color
             # Utilize cv_bridge to transform it to grayscale
             try:
-                # Convert the ROS Image message to a BGR OpenCV image
-                bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
-
                 # Convert the BGR image to grayscale
-                grayscale_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+                grayscale_image = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
 
                 # Convert the grayscale image back to a ROS Image message
                 grayscale_msg = self.cv_bridge.cv2_to_imgmsg(grayscale_image, "mono8")
@@ -190,6 +183,8 @@ class SensorModel:
 
             except CvBridgeError as e:
                 rospy.logerr("CVBridge Error: %s", e)
+        duration = rospy.Time.now() - now
+        rospy.loginfo("Callback time: %f seconds", duration.to_sec())
             
 
     def depth_to_3d(self, img_depth):
