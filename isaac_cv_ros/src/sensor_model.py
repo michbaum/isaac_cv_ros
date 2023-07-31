@@ -56,7 +56,7 @@ class SensorModel:
                 self.coefficients[i] = rospy.get_param('~k_mu_%i' % i, 0.0)
                 self.coefficients[4 + i] = rospy.get_param('~k_sigma_%i' % i, 0.0)
 
-        # Initialize camera params from params or wait for unreal_ros_client to publish them
+        # Initialize camera params from params or wait for isaac_ros_client to publish them
         if not rospy.has_param(camera_params_ns+'width'):
             rospy.loginfo("Waiting for isaac camera params at '%s' ...", camera_params_ns)
             while not rospy.has_param(camera_params_ns+'/width'):
@@ -67,13 +67,8 @@ class SensorModel:
         self.camera_params = [rospy.get_param(camera_params_ns+'/width'), rospy.get_param(camera_params_ns+'/height'),
                               rospy.get_param(camera_params_ns+'/focal_length')]
 
-        # DEBUGGING
-        # pdb.set_trace()
-        # rospy.loginfo(self.camera_params)
-
         # Initialize node
         self.pub = rospy.Publisher("~isaac_sensor_out", PointCloud2, queue_size=10)
-        # TODO: (michbaum) Adapt
         self.sub = rospy.Subscriber("isaac_sensor_raw", IsaacSensorRaw, self.callback, queue_size=10)
         self.cv_bridge = CvBridge()
         if self.publish_color_images:
@@ -92,29 +87,11 @@ class SensorModel:
             img_color = self.cv_bridge.imgmsg_to_cv2(ros_data.color_data)
         else:
             rospy.logerr("Color image not populated!!")
-        # img_depth = np.array(ros_data.depth_data).reshape((480,640)) / 100.0 # TODO: (michbaum) I think this is the correct scale, at least it looks right
         if ros_data.depth_data is not None:
             img_depth = self.cv_bridge.imgmsg_to_cv2(ros_data.depth_data)
         else:
             rospy.logerr("Depth image not populated!!")
-
-        # rgb_msg = Image()
-        # rgb_msg.data = img_color
-        # bgr_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg)
-        # DEBUGGING
-        # plt.imshow(img_color)
-        # plt.show()
         
-        # plt.imshow(img_depth)
-        # plt.show()
-        # img_depth = np.asarray(ros_data.depth_data, dtype = np.float32).reshape((480, 640))
-        #print(img_depth[0])
-        # img_depth = np.load(io.BytesIO(ros_data.depth_data))
-        #import pdb
-        #pdb.set_trace()
-        #np.save('~/depth.npy')
-        
-        # TODO: (michbaum) Check if this stuff still works
         mask_depth = img_depth.reshape(-1)
 
         # Build 3D point cloud from depth
@@ -122,10 +99,8 @@ class SensorModel:
             img_depth = np.clip(img_depth, 0, self.flatten_distance)
         (x, y, z) = self.depth_to_3d(img_depth)
 
-        # TODO: (michbaum) Check if this works
         # Pack RGB image (for ros representation)
         rgb = self.rgb_to_float(img_color)
-        # rgb = img_color
 
         # Remove invalid points
         if self.maximum_distance > 0:
@@ -164,10 +139,8 @@ class SensorModel:
 
         # If requested, also publish the image
         if self.publish_color_images:
-            # img_msg = self.cv_bridge.cv2_to_imgmsg(img_color, "rgba8")
             self.color_img_pub.publish(ros_data.color_data)
         if self.publish_gray_images:
-            # img_msg = self.cv_bridge.cv2_to_imgmsg(cv2.cvtColor(img_color[:, :, 0:3], cv2.COLOR_RGB2GRAY), "mono8")
             # Utilize cv_bridge to transform it to grayscale
             try:
                 # Convert the BGR image to grayscale
@@ -183,6 +156,8 @@ class SensorModel:
 
             except CvBridgeError as e:
                 rospy.logerr("CVBridge Error: %s", e)
+        
+        # Time the callback
         duration = rospy.Time.now() - now
         rospy.loginfo("Callback time: %f seconds", duration.to_sec())
             
@@ -197,12 +172,11 @@ class SensorModel:
         f = self.camera_params[2]
         cols, rows = np.meshgrid(np.linspace(0, width - 1, num=width), np.linspace(0, height - 1, num=height))
 
-        # DEBUGGING
-        # pdb.set_trace()
 
         # Process depth image from ray length to camera axis depth
         distance = ((rows - center_y) ** 2 + (cols - center_x) ** 2) ** 0.5
         # points_z = img_depth / (1 + (distance / f) ** 2) ** 0.5
+        
         # TODO: (michbaum) Testing if depth images are already in camera axis depth -> They indeed are
         points_z = img_depth
 
