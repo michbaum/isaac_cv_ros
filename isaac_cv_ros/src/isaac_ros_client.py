@@ -14,7 +14,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from isaac_cv_ros.msg import IsaacSensorRaw
 from isaac_ros_messages.srv import IsaacPose
 from isaac_ros_messages.srv import IsaacPoseRequest
-from geometry_msgs.msg import Pose, TransformStamped
+from geometry_msgs.msg import Pose, PoseStamped, TransformStamped
 from std_srvs.srv import SetBool
 import tf
 import tf2_ros
@@ -43,9 +43,11 @@ class IsaacRosClient:
         # Read in params
         self.collision_on = rospy.get_param('~collision_on', True)  # Check for collision
         # self.publish_tf = rospy.get_param('~publish_tf', False)  # If true publish the camera transformation in tf
+        
         self.queue_size = rospy.get_param('~queue_size', 1)  # How many requests are kept
         self.lock = threading.Lock()
         self.service_proxy = rospy.ServiceProxy('teleport', IsaacPose, persistent=True)
+        self.slowdown = 0.0 # Delay between teleport and image/depth saving for rendering purposes
 
         # Initialize a tf listener to transform the physical sim frame to the visual sim frame
         self.tfBuffer = tf2_ros.Buffer()
@@ -99,11 +101,13 @@ class IsaacRosClient:
 
 
         # We populate the image message centrally as soon as a new odometry message is received
-        # TODO: (michbaum) Maybe needs a mutex
         self.image_message = IsaacSensorRaw()
         self.image_message.color_data = None
         self.image_message.depth_data = None
         self.odom_ready = False
+
+        self.skip_frames_color = 0
+        self.skip_frames_depth = 0
 
 
         # Setup subscribers
@@ -116,7 +120,8 @@ class IsaacRosClient:
         rospy.Service('~terminate_with_reset', SetBool, self.terminate_with_reset_srv)
         if self.collision_on:
             self.collision_pub = rospy.Publisher("~collision", String, queue_size=10)
-        # rospy.loginfo("isaac_ros_client is ready in %s mode." % self.mode)
+        
+        rospy.loginfo("isaac_ros_client is ready.")
 
     def cam_info_callback(self, cam_info_data):
         # Setup camera parameters from isaac sim config
@@ -139,26 +144,56 @@ class IsaacRosClient:
         if not self.odom_ready:
             return
         
+        # rospy.loginfo("In color callback with timestamp: %f", rgb_data.header.stamp.to_nsec())
+        
+        # Make sure to not capture stale data
+        # Doesn't work until the ROS time is synced
+        # if rgb_data.header.stamp.to_nsec() < self.image_message.header.stamp.to_nsec() + self.slowdown * 1e9:
+        #     return
+
+        # Since the image data is currently not published with ros /clock timestamps but with isaac sim time
+        # we solve the staleness by throwing away some frames
+        if self.skip_frames_color < 1:
+            self.skip_frames_color += 1
+            return
+        
         # Check if rgb image is already written
         if self.image_message.color_data is None:
             # Acquire lock for the message
             with self.lock:
                 self.image_message.color_data = rgb_data
 
+                # rospy.loginfo("Populate sensor message color with timestamp: %f", rgb_data.header.stamp.to_nsec())
+
                 # Check if depth has also been written, then we can publish
                 if self.image_message.depth_data is not None:
                     self.pub.publish(self.image_message)
 
                     # Reset the message
-                    self.odom_ready = False
                     self.image_message = IsaacSensorRaw()
                     self.image_message.color_data = None
                     self.image_message.depth_data = None
+                    self.skip_frames_color = 0
+                    self.skip_frames_depth = 0
+                    self.odom_ready = False
 
 
     def depth_callback(self, depth_data):
         # We only collect an image if we teleported to the next position
         if not self.odom_ready:
+            return
+        
+        # rospy.loginfo("In depth callback with timestamp: %f", depth_data.header.stamp.to_nsec())
+
+        # Make sure to not capture stale data
+        # Doesn't work until the ROS time is synced
+        # if depth_data.header.stamp.to_nsec() < self.image_message.header.stamp.to_nsec() + self.slowdown * 1e9:
+        #     return
+
+        # Since the image data is currently not published with ros /clock timestamps but with isaac sim time
+        # we solve the staleness by throwing away some frames
+        if self.skip_frames_depth < 1:
+            self.skip_frames_depth += 1
             return
 
         # Check if rgb image is already written
@@ -167,21 +202,27 @@ class IsaacRosClient:
             with self.lock:
                 self.image_message.depth_data = depth_data
 
+                # rospy.loginfo("Populate sensor message depth with timestamp: %f", depth_data.header.stamp.to_nsec())
+
+
                 # Check if rgb has also been written, then we can publish
                 if self.image_message.color_data is not None:
                     self.pub.publish(self.image_message)
 
                     # Reset the message
-                    self.odom_ready = False
                     self.image_message = IsaacSensorRaw()
                     self.image_message.color_data = None
                     self.image_message.depth_data = None
+                    self.skip_frames_color = 0
+                    self.skip_frames_depth = 0
+                    self.odom_ready = False
                     
 
     def odom_callback(self, ros_data):
         ''' Produce images for given odometry '''
         if self.should_terminate:
             return
+
 
         # We should only do something if the last message has been successfully sent
         if self.odom_ready:
@@ -203,7 +244,12 @@ class IsaacRosClient:
     def publish_images(self, odom_msg):
         ''' Produce and publish images'''
         self.image_message.header.stamp = odom_msg.header.stamp
+
+        # rospy.loginfo("Populate sensor message with timestamp: %f", odom_msg.header.stamp.to_nsec())
         
+        # Add the pose into the sensor message for publication to be able to debug better
+        self.image_message.pose = odom_msg.pose.pose
+
         # Set the camera in the simulation
         teleport_msg = IsaacPoseRequest()
         teleport_msg.names = ["/World/Camera"]
@@ -226,8 +272,14 @@ class IsaacRosClient:
 
         # Call the service
         self.service_proxy(teleport_msg)
+        # TODO: Possibel bug of sending stale renders in isaac sim
+        # self.service_proxy(teleport_msg)
+        # self.service_proxy(teleport_msg)
+
+        # rospy.loginfo("TELEPORTED")
 
         # TODO: (michbaum) Need a new solution for collision
+        # Probably solvable by publishing the camera tf https://docs.omniverse.nvidia.com/isaacsim/latest/tutorial_ros_tf.html
 
         self.odom_ready = True
 
@@ -235,7 +287,8 @@ class IsaacRosClient:
         # Transform the pose from /camera to /camera_sim frame
         try:
             # Create a TransformStamped object to store the transformed pose
-            transformStamped = self.tfBuffer.lookup_transform("sim_world", "camera_sim", pose.header.stamp)
+            # transformStamped = self.tfBuffer.lookup_transform("sim_world", "camera_sim", pose.header.stamp)
+            transformStamped = self.tfBuffer.lookup_transform("sim_world", "camera_sim_frame", pose.header.stamp)
 
             transformed_pose = Pose()
             transformed_pose.orientation = transformStamped.transform.rotation
@@ -248,6 +301,7 @@ class IsaacRosClient:
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
             rospy.logwarn("Transform lookup failed!")
             return None
+        
 
     def terminate_with_reset_srv(self, _):
         # Reset to initial conditions after experiment

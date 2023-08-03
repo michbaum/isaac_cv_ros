@@ -3,6 +3,7 @@
 # ros
 import rospy
 from sensor_msgs.msg import PointCloud2, PointField, Image
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from isaac_cv_ros.msg import IsaacSensorRaw
 
 # Image conversion
@@ -36,7 +37,9 @@ class SensorModel:
         self.publish_gray_images = rospy.get_param('~publish_gray_images', False)
         self.maximum_distance = rospy.get_param('~maximum_distance', 0)  # Set to 0 to keep all points
         self.flatten_distance = rospy.get_param('~flatten_distance', 0)  # Set to 0 to ignore
-
+        # If true publish a transform stamped message based on the teleport pose
+        self.publish_transform_stamped = rospy.get_param('~publish_transform_stamped', False) 
+        
         # Setup sensor type
         model_types = {'ground_truth': 'ground_truth', 'kinect': 'kinect',
                        'gaussian_depth_noise': 'gaussian_depth_noise'}      # Dictionary of implemented models
@@ -76,19 +79,22 @@ class SensorModel:
         if self.publish_gray_images:
             self.gray_img_pub = rospy.Publisher("~isaac_gray_image_out", Image, queue_size=10)
 
+        if self.publish_transform_stamped:
+            self.transform_pub = rospy.Publisher("~transform", TransformStamped, queue_size=10)
+            self.pose_pub = rospy.Publisher("~pose", PoseStamped, queue_size=10)
         rospy.loginfo("Sensor model setup cleanly.")
 
-    def callback(self, ros_data):
+    def callback(self, sensor_raw_data):
         ''' Produce simulated sensor outputs from raw binary data '''
         # Time the callback
-        now = rospy.Time.now()
+        # now = rospy.Time.now()
         # Read out images
-        if ros_data.color_data is not None:
-            img_color = self.cv_bridge.imgmsg_to_cv2(ros_data.color_data)
+        if sensor_raw_data.color_data is not None:
+            img_color = self.cv_bridge.imgmsg_to_cv2(sensor_raw_data.color_data)
         else:
             rospy.logerr("Color image not populated!!")
-        if ros_data.depth_data is not None:
-            img_depth = self.cv_bridge.imgmsg_to_cv2(ros_data.depth_data)
+        if sensor_raw_data.depth_data is not None:
+            img_depth = self.cv_bridge.imgmsg_to_cv2(sensor_raw_data.depth_data)
         else:
             rospy.logerr("Depth image not populated!!")
         
@@ -116,12 +122,25 @@ class SensorModel:
         elif self.model == 'gaussian_depth_noise':
             z = self.process_gaussian_depth_noise(z)
 
+        # rospy.loginfo("Populating point cloud message with timestamp: %f", ros_data.header.stamp.to_nsec())
+
+        # TODO: Try to transform the pointcloud to /world manually with the pose where the image was taken from
+        #       There should be some tf utility for transforming a whole pointcloud
+
+        # TODO: Visualize the pose that we took the image from to check that the shit is actually reasonable
+
+        # TODO: Publish the teleported poses with another frame name and change the pointcloud frame to that one
+
+        # Publish transform
+        if self.publish_transform_stamped:
+            self.publish_transform(sensor_raw_data)
+
 
         # Publish pointcloud
         data = np.transpose(np.vstack((x, y, z, rgb)))
         msg = PointCloud2()
-        msg.header.stamp = ros_data.header.stamp
-        msg.header.frame_id = 'camera'
+        msg.header.stamp = sensor_raw_data.header.stamp
+        msg.header.frame_id = 'camera' # Needs to be in Gazebo frame, so NOT camera_sim
         msg.width = data.shape[0]
         msg.height = 1
         msg.fields = [
@@ -130,7 +149,7 @@ class SensorModel:
             PointField('z', 8, PointField.FLOAT32, 1),
             PointField('rgb', 12, PointField.FLOAT32, 1)]
         msg.is_bigendian = False
-        msg.point_step = np.dtype(np.float32).itemsize*4# 16
+        msg.point_step = np.dtype(np.float32).itemsize*4 # 16
         msg.row_step = msg.point_step * msg.width
         msg.is_dense = True
         #msg.data = np.float32(data).tostring()
@@ -139,7 +158,7 @@ class SensorModel:
 
         # If requested, also publish the image
         if self.publish_color_images:
-            self.color_img_pub.publish(ros_data.color_data)
+            self.color_img_pub.publish(sensor_raw_data.color_data)
         if self.publish_gray_images:
             # Utilize cv_bridge to transform it to grayscale
             try:
@@ -150,17 +169,41 @@ class SensorModel:
                 grayscale_msg = self.cv_bridge.cv2_to_imgmsg(grayscale_image, "mono8")
 
                 # Publish the grayscale image
-                grayscale_msg.header.stamp = ros_data.header.stamp
-                grayscale_msg.header.frame_id = 'camera'
+                grayscale_msg.header.stamp = sensor_raw_data.header.stamp
+                grayscale_msg.header.frame_id = 'camera' # Needs to be in Gazebo frame, so NOT camera_sim
                 self.gray_img_pub.publish(grayscale_msg)
 
             except CvBridgeError as e:
                 rospy.logerr("CVBridge Error: %s", e)
         
         # Time the callback
-        duration = rospy.Time.now() - now
-        rospy.loginfo("Callback time: %f seconds", duration.to_sec())
+        # duration = rospy.Time.now() - now
+        # rospy.loginfo("Callback time: %f seconds", duration.to_sec())
             
+    def publish_transform(self, sensor_raw_msg):
+        # Create a new TransformStamped message
+        transform_msg = TransformStamped()
+
+        # Set the header
+        transform_msg.header = sensor_raw_msg.header
+
+        # Set the child and parent frames
+        transform_msg.child_frame_id = 'camera_pointcloud'
+        transform_msg.header.frame_id = 'world'
+
+        # Set the transform translation and rotation
+        transform_msg.transform.translation = sensor_raw_msg.pose.position
+        transform_msg.transform.rotation = sensor_raw_msg.pose.orientation
+
+        self.transform_pub.publish(transform_msg)
+
+
+        # Also publish a pose topic to visualize in rviz
+        pose_msg = PoseStamped()
+        pose_msg.header = sensor_raw_msg.header
+        pose_msg.pose = sensor_raw_msg.pose
+        self.pose_pub.publish(pose_msg)
+
 
     def depth_to_3d(self, img_depth):
         ''' Create point cloud from depth image and camera params. Returns a single array for x, y and z coords '''
