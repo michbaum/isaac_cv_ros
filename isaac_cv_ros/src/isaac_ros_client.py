@@ -19,6 +19,8 @@ from std_srvs.srv import SetBool
 import tf
 import tf2_ros
 from tf2_geometry_msgs import do_transform_pose
+import cv2
+from cv_bridge import CvBridge, CvBridgeError
 
 # Python
 import sys
@@ -43,7 +45,8 @@ class IsaacRosClient:
         # Read in params
         self.collision_on = rospy.get_param('~collision_on', True)  # Check for collision
         # self.publish_tf = rospy.get_param('~publish_tf', False)  # If true publish the camera transformation in tf
-        
+        self.publish_color_images = rospy.get_param('~publish_color_images', False)
+        self.publish_gray_images = rospy.get_param('~publish_gray_images', False)
         self.queue_size = rospy.get_param('~queue_size', 1)  # How many requests are kept
         self.lock = threading.Lock()
         self.service_proxy = rospy.ServiceProxy('teleport', IsaacPose, persistent=True)
@@ -101,9 +104,9 @@ class IsaacRosClient:
 
 
         # We populate the image message centrally as soon as a new odometry message is received
-        self.image_message = IsaacSensorRaw()
-        self.image_message.color_data = None
-        self.image_message.depth_data = None
+        self.combined_img_msg = IsaacSensorRaw()
+        self.combined_img_msg.color_data = None
+        self.combined_img_msg.depth_data = None
         self.odom_ready = False
 
         self.skip_frames_color = 0
@@ -120,6 +123,13 @@ class IsaacRosClient:
         rospy.Service('~terminate_with_reset', SetBool, self.terminate_with_reset_srv)
         if self.collision_on:
             self.collision_pub = rospy.Publisher("~collision", String, queue_size=10)
+
+        if self.publish_color_images or self.publish_gray_images:
+            self.cv_bridge = CvBridge()
+        if self.publish_color_images:
+            self.color_img_pub = rospy.Publisher("~isaac_color_image_out", Image, queue_size=10)
+        if self.publish_gray_images:
+            self.gray_img_pub = rospy.Publisher("~isaac_gray_image_out", Image, queue_size=10)
         
         rospy.loginfo("isaac_ros_client is ready.")
 
@@ -158,21 +168,44 @@ class IsaacRosClient:
             return
         
         # Check if rgb image is already written
-        if self.image_message.color_data is None:
+        if self.combined_img_msg.color_data is None:
+            
+            # Publish the images if necessary
+            if self.publish_color_images:
+                rgb_data.header.stamp = self.combined_img_msg.header.stamp
+                self.color_img_pub.publish(rgb_data)
+            if self.publish_gray_images:
+            # Utilize cv_bridge to transform it to grayscale
+                try:
+                    img_color = self.cv_bridge.imgmsg_to_cv2(rgb_data)
+                    # Convert the BGR image to grayscale
+                    grayscale_image = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+
+                    # Convert the grayscale image back to a ROS Image message
+                    grayscale_msg = self.cv_bridge.cv2_to_imgmsg(grayscale_image, "mono8")
+
+                    # Publish the grayscale image
+                    grayscale_msg.header.stamp = self.combined_img_msg.header.stamp
+                    grayscale_msg.header.frame_id = 'camera' # Needs to be in Gazebo frame, so NOT camera_sim
+                    self.gray_img_pub.publish(grayscale_msg)
+
+                except CvBridgeError as e:
+                    rospy.logerr("CVBridge Error: %s", e)
+
             # Acquire lock for the message
             with self.lock:
-                self.image_message.color_data = rgb_data
+                self.combined_img_msg.color_data = rgb_data
 
                 # rospy.loginfo("Populate sensor message color with timestamp: %f", rgb_data.header.stamp.to_nsec())
 
                 # Check if depth has also been written, then we can publish
-                if self.image_message.depth_data is not None:
-                    self.pub.publish(self.image_message)
+                if self.combined_img_msg.depth_data is not None:
+                    self.pub.publish(self.combined_img_msg)
 
                     # Reset the message
-                    self.image_message = IsaacSensorRaw()
-                    self.image_message.color_data = None
-                    self.image_message.depth_data = None
+                    self.combined_img_msg = IsaacSensorRaw()
+                    self.combined_img_msg.color_data = None
+                    self.combined_img_msg.depth_data = None
                     self.skip_frames_color = 0
                     self.skip_frames_depth = 0
                     self.odom_ready = False
@@ -197,22 +230,22 @@ class IsaacRosClient:
             return
 
         # Check if rgb image is already written
-        if self.image_message.depth_data is None:
+        if self.combined_img_msg.depth_data is None:
             # Acquire lock for the message
             with self.lock:
-                self.image_message.depth_data = depth_data
+                self.combined_img_msg.depth_data = depth_data
 
                 # rospy.loginfo("Populate sensor message depth with timestamp: %f", depth_data.header.stamp.to_nsec())
 
 
                 # Check if rgb has also been written, then we can publish
-                if self.image_message.color_data is not None:
-                    self.pub.publish(self.image_message)
+                if self.combined_img_msg.color_data is not None:
+                    self.pub.publish(self.combined_img_msg)
 
                     # Reset the message
-                    self.image_message = IsaacSensorRaw()
-                    self.image_message.color_data = None
-                    self.image_message.depth_data = None
+                    self.combined_img_msg = IsaacSensorRaw()
+                    self.combined_img_msg.color_data = None
+                    self.combined_img_msg.depth_data = None
                     self.skip_frames_color = 0
                     self.skip_frames_depth = 0
                     self.odom_ready = False
@@ -222,7 +255,6 @@ class IsaacRosClient:
         ''' Produce images for given odometry '''
         if self.should_terminate:
             return
-
 
         # We should only do something if the last message has been successfully sent
         if self.odom_ready:
@@ -237,18 +269,18 @@ class IsaacRosClient:
             
             # rospy.loginfo("Releasing lock in odom callback.")
 
-
         self.previous_odom_msg = ros_data
                 
 
     def publish_images(self, odom_msg):
         ''' Produce and publish images'''
-        self.image_message.header.stamp = odom_msg.header.stamp
+        # Populate the image time stamp
+        self.combined_img_msg.header.stamp = odom_msg.header.stamp
 
         # rospy.loginfo("Populate sensor message with timestamp: %f", odom_msg.header.stamp.to_nsec())
         
         # Add the pose into the sensor message for publication to be able to debug better
-        self.image_message.pose = odom_msg.pose.pose
+        self.combined_img_msg.pose = odom_msg.pose.pose
 
         # Set the camera in the simulation
         teleport_msg = IsaacPoseRequest()
