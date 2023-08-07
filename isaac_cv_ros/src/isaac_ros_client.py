@@ -57,7 +57,7 @@ class IsaacRosClient:
         self.tfListener = tf2_ros.TransformListener(self.tfBuffer)
 
         # Wait for the relevant transforms to be available
-        self.tfBuffer.can_transform("sim_world", "camera_sim", rospy.Time(0), rospy.Duration(10.0))
+        self.tfBuffer.can_transform("sim_world", "camera_sim_frame", rospy.Time(0), rospy.Duration(10.0))
     
         
         self.previous_odom_msg = None  # Previously processed Odom message
@@ -163,7 +163,7 @@ class IsaacRosClient:
 
         # Since the image data is currently not published with ros /clock timestamps but with isaac sim time
         # we solve the staleness by throwing away some frames
-        if self.skip_frames_color < 1:
+        if self.skip_frames_color < 4:
             self.skip_frames_color += 1
             return
         
@@ -225,7 +225,7 @@ class IsaacRosClient:
 
         # Since the image data is currently not published with ros /clock timestamps but with isaac sim time
         # we solve the staleness by throwing away some frames
-        if self.skip_frames_depth < 1:
+        if self.skip_frames_depth < 4:
             self.skip_frames_depth += 1
             return
 
@@ -359,6 +359,7 @@ class IsaacRosClient:
         
         return [True, ""]
 
+    # Currently not handled
     def on_collision(self):
         # Collision handling for all modes here
         rospy.logwarn("MAV collision detected!")
